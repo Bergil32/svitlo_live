@@ -1,24 +1,14 @@
-"""Константи для інтеграції «Світло»."""
-DOMAIN = "svitlo_ua"
+DOMAIN = "svitlo_krem"
+BASE = "https://www.dtek-krem.com.ua"
+CACHE_KEY = "svitlo_krem_cache"
+DEFAULT_SCAN_MINUTES = 180 # update every 3 hours by default
+TIMEOUT = 25
 
-# Відповідність назвою регіона та API або URL джерела
-REGION_API_MAPPING = {
-    # Регіони Yasno:
-    "Київ": {"api": "yasno", "region_code": "kiev"},
-    "Київська область": {"api": "yasno", "region_code": "kievobl"},
-    "Дніпропетровська обл.": {"api": "yasno", "region_code": "dnipro"},
-    # Інші регіони Energy UA:
-    "Львівська обл.": {"api": "energy_ua", "region_code": "lviv"},
-    "Полтавська обл.": {"api": "energy_ua", "region_code": "poltava"},
-    "Харківська обл.": {"api": "energy_ua", "region_code": "kharkiv"},
-    "Чернігівська обл.": {"api": "energy_ua", "region_code": "chernigiv"},
-    "Запорізька обл.": {"api": "energy_ua", "region_code": "zap"},
-    "Закарпатська обл.": {"api": "energy_ua", "region_code": "zakarpat"},
-    "Тернопільська обл.": {"api": "energy_ua", "region_code": "ternopil"},
-    "Хмельницька обл.": {"api": "energy_ua", "region_code": "khmel"},
-    "Чернівецька обл.": {"api": "energy_ua", "region_code": "chernivtsi"},
-    "Сумська обл.": {"api": "energy_ua", "region_code": "sumy"},
-    "Рівненська обл.": {"api": "energy_ua", "region_code": "rivne"},
-    "Житомирська обл.": {"api": "energy_ua", "region_code": "zhytomyr"},
-    "Івано-Франківська обл.": {"api": "energy_ua", "region_code": "prykarpattya"}
-}
+
+CONF_CITY = "city"
+CONF_STREET = "street"
+CONF_HOUSE = "house"
+CONF_SCAN_INTERVAL = "scan_interval"
+CONF_MODE = "mode"
+MODE_MANUAL = "manual"
+MODE_GUIDED = "guided"
