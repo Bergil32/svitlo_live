@@ -1,7 +1,7 @@
 {
   "domain": "svitlo_live",
   "name": "Svitlo.live Schedules",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "documentation": "https://github.com/yourname/svitlo_live",
   "issue_tracker": "https://github.com/yourname/svitlo_live/issues",
   "dependencies": [],
