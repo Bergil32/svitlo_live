@@ -1,5 +1,9 @@
+from homeassistant.const import Platform
 
 DOMAIN = "svitlo_live"
+
+# Які платформи піднімаємо
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 # Глобальний дефолт (секунди) — використається, якщо в options немає значення
 DEFAULT_SCAN_INTERVAL = 900  # 15 хв
