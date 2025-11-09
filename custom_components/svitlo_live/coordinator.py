@@ -25,32 +25,26 @@ _LOGGER = logging.getLogger(__name__)
 # Таймзона України
 TZ_KYIV = dt_util.get_time_zone("Europe/Kyiv")
 
-# Скільки секунд вважаємо валідним спільний кеш JSON, щоб уникнути подвійних запитів на старті
-MIN_REUSE_SECONDS = 120  # 2 хвилини вистачає, щоб усі платформи встигли піднятись
+# Спільний кеш: скільки секунд перевикористовуємо JSON, щоби уникнути дублів на старті
+MIN_REUSE_SECONDS = 120
 
 
 class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """
-    Координатор: тягне JSON з проксі (Cloudflare Worker) ОДИН раз на увесь HA,
-    будує 48 півгодинних слотів на сьогодні/завтра для поточного entry,
-    визначає next_on/off і планує точне перемикання ентиті у моменти 00/30 хв.
-    """
+    """Тягне JSON з проксі 1 раз на весь HA і будує дані для конкретного region/queue."""
 
     def __init__(self, hass: HomeAssistant, config: dict[str, Any]) -> None:
         self.hass = hass
         self.region: str = config[CONF_REGION]
         self.queue: str = config[CONF_QUEUE]
 
-        # інтервал з __init__.py або дефолт
         scan_seconds = int(config.get("scan_interval_seconds", DEFAULT_SCAN_INTERVAL))
 
-        # Спільні структури для всього DOMAIN
         shared = hass.data.setdefault(DOMAIN, {})
         if "_shared_api" not in shared:
             shared["_shared_api"] = {
                 "lock": asyncio.Lock(),
-                "last_json": None,           # сирий JSON з воркера
-                "last_json_utc": None,       # коли отримали
+                "last_json": None,
+                "last_json_utc": None,
             }
         self._shared_api = shared["_shared_api"]
 
@@ -64,14 +58,8 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """
-        1) Отримаємо/перевикористаємо СПІЛЬНИЙ JSON для всіх entries.
-        2) Побудуємо payload конкретно для self.region/self.queue.
-        3) Сплануємо точний тик.
-        """
+        # 1) Спільний кеш
         now_utc = dt_util.utcnow()
-
-        # --- 1) Спільний кеш для всіх координаторів цього DOMAIN
         shared = self._shared_api
         last_json = shared.get("last_json")
         last_json_utc: Optional[datetime] = shared.get("last_json_utc")
@@ -83,9 +71,7 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         if not should_reuse:
-            # single-flight: лише один реальний фетч
             async with shared["lock"]:
-                # повторна перевірка всередині lock (хтось міг уже оновити)
                 last_json = shared.get("last_json")
                 last_json_utc = shared.get("last_json_utc")
                 should_reuse = (
@@ -106,13 +92,13 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     except Exception as e:
                         raise UpdateFailed(f"Network error: {e}") from e
 
-        # --- 2) Будуємо payload для цього entry
+        # 2) Побудова payload
         try:
             payload = self._build_from_api(last_json)
         except Exception as e:
             raise UpdateFailed(f"Parse/build error: {e}") from e
 
-        # --- 3) Плануємо точну зміну стану
+        # 3) Точний тик
         self._schedule_precise_refresh(payload)
         return payload
 
@@ -121,26 +107,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ---------------------------------------------------------------------
 
     def _build_from_api(self, api: dict[str, Any]) -> dict[str, Any]:
-        """
-        Очікувана структура (спрощено):
-        {
-          "date_today": "YYYY-MM-DD",
-          "date_tomorrow": "YYYY-MM-DD",
-          "regions": [
-            {
-              "cpu": "jitomirska-oblast",
-              "schedule": {
-                "1.1": {
-                  "YYYY-MM-DD": {"00:00": 1, "00:30": 1, ...},  # 1/2/0
-                  "YYYY-MM-DD+1": {...}
-                },
-                ...
-              }
-            },
-            ...
-          ]
-        }
-        """
         date_today = api.get("date_today")
         date_tomorrow = api.get("date_tomorrow")
 
@@ -149,8 +115,34 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(f"Region {self.region} not found in API")
 
         schedule = (region_obj.get("schedule") or {}).get(self.queue) or {}
-        slots_today_map = schedule.get(date_today) or {}
-        slots_tomorrow_map = schedule.get(date_tomorrow) or {}
+        slots_today_map: dict[str, int] = schedule.get(date_today) or {}
+        slots_tomorrow_map: dict[str, int] = schedule.get(date_tomorrow) or {}
+
+        # >>> НОВА ЛОГІКА nosched:
+        # якщо на сьогодні немає ЖОДНОГО 1 або 2 (тобто лише 0/порожньо) — це «нема розкладу»
+        has_any_slots = any(v in (1, 2) for v in slots_today_map.values())
+        if not has_any_slots:
+            base_day = (
+                datetime.fromisoformat(date_today).date()
+                if date_today else dt_util.now(TZ_KYIV).date()
+            )
+            data_nosched: dict[str, Any] = {
+                "queue": self.queue,
+                "date": base_day.isoformat(),
+                "now_status": "nosched",
+                "now_halfhour_index": None,
+                "next_change_at": None,
+                "today_48half": [],
+                "updated": dt_util.utcnow().replace(microsecond=0).isoformat(),
+                "source": API_URL,
+                "next_on_at": None,
+                "next_off_at": None,
+            }
+            if date_tomorrow and (schedule.get(date_tomorrow) or {}):
+                data_nosched["tomorrow_date"] = date_tomorrow
+                data_nosched["tomorrow_48half"] = []
+            return data_nosched
+        # <<< КІНЕЦЬ НОВОЇ ЛОГІКИ
 
         def build_half_list(slots_map: dict[str, int]) -> list[str]:
             res: list[str] = []
@@ -169,7 +161,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         today_half = build_half_list(slots_today_map)
         tomorrow_half = build_half_list(slots_tomorrow_map) if slots_tomorrow_map else []
 
-        # Теперішній індекс по локальному Києву
         now_local = dt_util.now(TZ_KYIV)
         base_day = datetime.fromisoformat(date_today).date() if date_today else now_local.date()
         if now_local.date() != base_day:
@@ -194,12 +185,12 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "date": base_day.isoformat(),
             "now_status": cur,                       # "on"/"off"/"unknown"
             "now_halfhour_index": idx,
-            "next_change_at": next_change_hhmm,      # "HH:MM" (локальний Київ)
+            "next_change_at": next_change_hhmm,      # "HH:MM" (Київ)
             "today_48half": today_half,
-            "updated": dt_util.utcnow().replace(microsecond=0).isoformat(),  # UTC ISO
+            "updated": dt_util.utcnow().replace(microsecond=0).isoformat(),
             "source": API_URL,
-            "next_on_at": next_on_at,                # UTC ISO або None
-            "next_off_at": next_off_at,              # UTC ISO або None
+            "next_on_at": next_on_at,
+            "next_off_at": next_off_at,
         }
 
         if date_tomorrow and tomorrow_half:
@@ -217,7 +208,14 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ---------------------------------------------------------------------
 
     def _schedule_precise_refresh(self, data: dict[str, Any]) -> None:
-        """Ставимо таймер на наступний локальний півгодинний перехід — лише refresh."""
+        # якщо нема розкладу — не плануємо тік
+        if data.get("now_status") == "nosched":
+            if self._unsub_precise:
+                self._unsub_precise()
+                self._unsub_precise = None
+            _LOGGER.debug("No schedule for %s/%s today — precise tick not scheduled", self.region, self.queue)
+            return
+
         if self._unsub_precise:
             self._unsub_precise()
             self._unsub_precise = None
@@ -231,7 +229,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             base_day = datetime.fromisoformat(base_date_iso).date()
             hh, mm = [int(x) for x in next_change_hhmm.split(":")]
 
-            # Локальний Київський момент
             candidate_kyiv = datetime.combine(base_day, datetime.min.time(), tzinfo=TZ_KYIV).replace(
                 hour=hh, minute=mm, second=0, microsecond=0
             )
@@ -259,7 +256,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _next_change_idx(series: list[str], idx: int) -> Optional[int]:
-        """Знайти індекс наступної зміни стану в 30-хв серії (циклічно в межах доби)."""
         if not series:
             return None
         cur = series[idx]
@@ -279,10 +275,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         tomorrow_date_iso: Optional[str],
         tomorrow_half: Optional[list[str]],
     ) -> Optional[str]:
-        """
-        Повертає UTC ISO час НАСТУПНОГО target-стану ("on"/"off"),
-        з урахуванням переходу на завтра (Kyiv → UTC).
-        """
         if not today_half:
             return None
 
@@ -298,12 +290,10 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         if pos < len(today_tail):
-            # сьогодні
             base_local_midnight = datetime.combine(base_date, datetime.min.time(), tzinfo=TZ_KYIV)
             minutes_from_base = (idx + 1 + pos) * 30
             next_local = base_local_midnight + timedelta(minutes=minutes_from_base)
         else:
-            # завтра
             if not has_tomorrow:
                 return None
             tomorrow_date = datetime.fromisoformat(tomorrow_date_iso).date()
