@@ -96,18 +96,35 @@ action:
         {{ ("c=" ~ (raw_events|count|string) ~ ";" ~ ns.sig) | trim }}
 
       old_signature: "{{ states(storage_helper) | default('') }}"
-      changed: "{{ schedule_signature != old_signature and old_signature != '' }}"
+      changed: "{{ schedule_signature [-255:] != old_signature and old_signature != '' }}"
 
   - if:
       - condition: template
         value_template: "{{ changed }}"
     then:
       - variables:
-          today_iso: "{{ now().date().isoformat() }}"
-          tomorrow_iso: "{{ (now() + timedelta(days=1)).date().isoformat() }}"
+          today_iso: "{{ now().astimezone(now().tzinfo).date().isoformat() }}"
+          tomorrow_iso: "{{ (now().astimezone(now().tzinfo) + timedelta(days=1)).date().isoformat() }}"
 
-          events_today: "{{ raw_events | selectattr('start', 'search', today_iso) | list }}"
-          events_tomorrow: "{{ raw_events | selectattr('start', 'search', tomorrow_iso) | list }}"
+          events_today: >-
+            {% set today = now().astimezone(now().tzinfo).date() %}
+            {% set ns = namespace(events=[]) %}
+            {% for e in raw_events %}
+              {% if as_datetime(e.start).astimezone(now().tzinfo).date() == today %}
+                {% set ns.events = ns.events + [e] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.events }}
+
+          events_tomorrow: >-
+            {% set tomorrow = (now().astimezone(now().tzinfo) + timedelta(days=1)).date() %}
+            {% set ns = namespace(events=[]) %}
+            {% for e in raw_events %}
+              {% if as_datetime(e.start).astimezone(now().tzinfo).date() == tomorrow %}
+                {% set ns.events = ns.events + [e] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.events }}
 
           body: >-
             📍 {{ region_queue }}
@@ -151,4 +168,4 @@ action:
     target:
       entity_id: !input storage_helper
     data:
-      value: "{{ schedule_signature[:255] }}"
+      value: "{{ schedule_signature[-255:] }}"
